@@ -16,6 +16,7 @@ hops = hs.Hops(app)
     description="Solve the ILP Problem",
     icon="examples/pointat.png",
     inputs=[
+        hs.HopsString("Method","M","Method"),
         hs.HopsNumber("Stock","S","Stock Lengths", hs.HopsParamAccess.LIST),
         hs.HopsNumber("PartLengths","P","Part Lengths", hs.HopsParamAccess.LIST),
         hs.HopsNumber("PartCounts","C","Part Counts", hs.HopsParamAccess.LIST)
@@ -24,13 +25,40 @@ hops = hs.Hops(app)
         hs.HopsNumber("Selection","S","Solved Result", hs.HopsParamAccess.LIST)
     ],
 )
-def solve(stock_lengths, part_lengths, part_requests):
+def solve(method,stock_lengths, part_lengths, part_requests):
     """
     Entry point function from hops
     """
-    return solve_max(stock_lengths, part_lengths, part_requests)
+    model = Model()
+    #model.emphasis = 2
+    model.max_mip_gap_abs = 1.5
+    model.max_mip_gap = 5
+    if method == "default":
+        solve_function = solve_default
+    elif method == "waste":
+        solve_function = solve_waste
+    elif method == "max":
+        solve_function = solve_max
+        
+    model = solve_function(model,stock_lengths, part_lengths, part_requests)
     
-def solve_default(stock_lengths, part_lengths, part_requests):
+    # optimizing the model
+    model.optimize(max_nodes=10000, max_seconds=30)
+
+    # printing the solution
+    print('')
+    print('Objective value: {model.objective_value:.3}'.format(**locals()))
+    print('Solution: ', end='')
+    for v in model.vars:
+        if v.x > 1e-5:
+            print('{v.name} = {v.x}'.format(**locals()))
+            print('          ', end='')    
+            
+            
+    output = [float(v.x) for v in model.vars]
+    return output
+    
+def solve_default(model, stock_lengths, part_lengths, part_requests):
     """
     Strategy most similar to stock cutting example. 
     Built using loops and explicit utilization boolean variables
@@ -49,12 +77,6 @@ def solve_default(stock_lengths, part_lengths, part_requests):
     
     max_parts = np.max(part_requests)
     
-    #print(part_requests)
-    #print(part_lengths)
-
-    # Create Blank Model
-    model = Model()
-    model.max_mip_gap_abs = 1.5
     # Amount of each part used in that piece
     part_usage = {(i, j): model.add_var(obj=0, var_type=INTEGER, name="part_usage[%d,%d]" % (i, j), lb=0, ub=max_parts)
          for i in range(part_count) for j in range(stock_count)}
@@ -78,24 +100,10 @@ def solve_default(stock_lengths, part_lengths, part_requests):
         
     model.objective = minimize(xsum(stock_usage[i] for i in range(stock_count)))
 
-    # optimizing the model
-    model.optimize(max_nodes=10000)
-
-    # printing the solution
-    print('')
-    print('Objective value: {model.objective_value:.3}'.format(**locals()))
-    print('Solution: ', end='')
-    for v in model.vars:
-        if v.x > 1e-5:
-            print('{v.name} = {v.x}'.format(**locals()))
-            print('          ', end='')    
-            
-            
-    output = [float(v.x) for v in model.vars]
-    return output
+    return(model)
     
     
-def solve_waste(stock_lengths, part_lengths, part_requests):
+def solve_waste(model, stock_lengths, part_lengths, part_requests):
     """
     Optimizes for minimizing waste from used piecess
     Does not attempt leftover usability
@@ -110,9 +118,6 @@ def solve_waste(stock_lengths, part_lengths, part_requests):
     
     max_parts = np.max(part_requests)
 
-    # Create Blank Model
-    model = Model()
-    model.max_mip_gap_abs = 1.5
     # Amount of each part used in that piece
     part_usage = {(i, j): model.add_var(obj=0, var_type=INTEGER, name="part_usage[%d,%d]" % (i, j), lb=0, ub=max_parts)
          for i in range(part_count) for j in range(stock_count)}
@@ -133,24 +138,10 @@ def solve_waste(stock_lengths, part_lengths, part_requests):
                                     for i in range(part_count)
                                     for j in range(stock_count)))
 
-    # optimizing the model
-    model.optimize(max_nodes=10000)
-
-    # printing the solution
-    print('')
-    print('Objective value: {model.objective_value:.3}'.format(**locals()))
-    print('Solution: ', end='')
-    for v in model.vars:
-        if v.x > 1e-5:
-            print('{v.name} = {v.x}'.format(**locals()))
-            print('          ', end='')    
-            
-            
-    output = [float(v.x) for v in model.vars]
-    return output
+    return(model)
     
     
-def solve_max(stock_lengths, part_lengths, part_requests):
+def solve_max(model, stock_lengths, part_lengths, part_requests):
     """
     Ignores the utilized variable, tries to optimize the square of leftovers 
     Uses some SOS nonsense
@@ -165,10 +156,7 @@ def solve_max(stock_lengths, part_lengths, part_requests):
     
     max_parts = np.max(part_requests)
     largest_stock = np.max(stock_lengths)
-    
-    # Create Blank Model
-    model = Model()
-    model.max_mip_gap_abs = 1.5
+ 
     # Amount of each part used in that piece
     part_usage = {(i, j): model.add_var(obj=0, var_type=INTEGER, name="part_usage[%d,%d]" % (i, j), lb=0, ub=max_parts)
          for i in range(part_count) for j in range(stock_count)}
@@ -180,16 +168,14 @@ def solve_max(stock_lengths, part_lengths, part_requests):
         model.add_constr(xsum(part_usage[i, j] for j in range(stock_count)) == part_requests[i])
     # Ensure the used amount of the bar is <= the usable amount of the bar
     for j in range(stock_count):
-        model.add_constr(xsum(part_lengths[i] * part_usage[i, j] for i in range(part_count)) <= stock_lengths[j])
+        model.add_lazy_constr(xsum(part_lengths[i] * part_usage[i, j] for i in range(part_count)) <= stock_lengths[j])
     
     # Create the nonlinear function for the objective
     score = [model.add_var(f"score_{i}") for i in range(stock_count)]
     for j in range(stock_count):
-        d_count = 10
+        d_count = 6
         v = [stock_lengths[j] * (v / (d_count - 1)) for v in range(d_count)] # X values for pow function
         vn = [pow(stock_lengths[j] - v[n],2) for n in range(d_count)]
-        print(v)
-        print(vn)
         w = [model.add_var(f"w_{j}_{v}") for v in range(d_count)]
         model.add_constr(xsum(w) == 1)
         
@@ -204,22 +190,7 @@ def solve_max(stock_lengths, part_lengths, part_requests):
         
     model.objective = maximize(xsum(score[i] for i in range(stock_count)))
 
-    # optimizing the model
-    status = model.optimize(max_nodes=10000)
-
-    # printing the solution
-    print(status)
-    print('')
-    print('Objective value: {model.objective_value:.3}'.format(**locals()))
-    print('Solution: ', end='')
-    for v in model.vars:
-        if v.x > 1e-5:
-            print('{v.name} = {v.x}'.format(**locals()))
-            print('          ', end='')   
-
-    output = [float(v.x) for v in model.vars]
-    output = output[0:part_count * stock_count]
-    return output
+    return(model)
 
 
 if __name__ == "__main__":
